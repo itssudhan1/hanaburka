@@ -1,0 +1,3 @@
+-- Note: 0005_first_super_admin.sql intentionally not included in this repo export --
+-- it contains a real user's UUID/email. Recreate it yourself if you rebuild
+-- the database from scratch: promote your own admin user in admin_users.
