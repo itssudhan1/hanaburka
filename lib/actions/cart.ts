@@ -2,6 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
+import type { ActionResult } from "@/lib/actions/result";
 
 class NotSignedInError extends Error {}
 
@@ -14,8 +15,19 @@ async function requireUser() {
   return { supabase, user };
 }
 
-export async function addToCart(variantId: string, quantity: number) {
-  const { supabase, user } = await requireUser();
+export async function addToCart(
+  variantId: string,
+  quantity: number
+): Promise<ActionResult> {
+  const supabase = createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  // Returned, not thrown — see lib/actions/result.ts for why a thrown
+  // "Sign in" error never reaches the browser intact in production.
+  if (!user) {
+    return { ok: false, code: "NOT_SIGNED_IN", message: "Sign in to use your cart" };
+  }
 
   // Check stock before adding — never let the cart exceed what's actually
   // available, even though the real oversell guard is at checkout time.
@@ -26,7 +38,7 @@ export async function addToCart(variantId: string, quantity: number) {
     .single();
 
   if (!variant || variant.stock < quantity) {
-    throw new Error("Not enough stock available");
+    return { ok: false, code: "FAILED", message: "Not enough stock available" };
   }
 
   const { data: existing } = await supabase
@@ -41,12 +53,18 @@ export async function addToCart(variantId: string, quantity: number) {
       .from("cart_items")
       .update({ quantity: existing.quantity + quantity })
       .eq("id", existing.id);
-    if (error) throw new Error(error.message);
+    if (error) {
+      console.error("addToCart update failed:", error.message);
+      return { ok: false, code: "FAILED", message: "Could not add to bag. Please try again." };
+    }
   } else {
     const { error } = await supabase
       .from("cart_items")
       .insert({ user_id: user.id, variant_id: variantId, quantity });
-    if (error) throw new Error(error.message);
+    if (error) {
+      console.error("addToCart insert failed:", error.message);
+      return { ok: false, code: "FAILED", message: "Could not add to bag. Please try again." };
+    }
   }
 
   revalidatePath("/cart");
@@ -55,6 +73,7 @@ export async function addToCart(variantId: string, quantity: number) {
   // so a mutation from a product page needs the whole app revalidated,
   // or the badge would only refresh once the shopper happens to visit /cart.
   revalidatePath("/", "layout");
+  return { ok: true };
 }
 
 export async function updateCartItemQuantity(itemId: string, quantity: number) {

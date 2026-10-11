@@ -50,6 +50,15 @@ export default function CheckoutForm({
       try {
         const result = await placeOrder(input);
 
+        if (!result.ok) {
+          if (result.code === "NOT_SIGNED_IN") {
+            router.push("/login");
+            return;
+          }
+          setError(result.message);
+          return;
+        }
+
         if (whatsappNumber) {
           const message =
             `New order ${result.order_number}\n\n` +
@@ -67,8 +76,10 @@ export default function CheckoutForm({
         }
 
         router.push(`/order-confirmation/${result.order_number}`);
-      } catch (err: any) {
-        setError(err.message ?? "Could not place order");
+      } catch {
+        // Only reached for a genuinely unexpected failure (network drop,
+        // server crash) — expected ones come back as results above.
+        setError("Something went wrong placing your order. Please try again.");
       }
     });
   }

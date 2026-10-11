@@ -2,7 +2,8 @@
 
 import { z } from "zod";
 import { createClient } from "@/lib/supabase/server";
-import { checkoutSchemaBase } from "@/lib/actions/checkout-schema";
+import { checkoutSchemaBase, describeCheckoutIssue } from "@/lib/actions/checkout-schema";
+import type { ActionResult } from "@/lib/actions/result";
 
 const checkoutSchema = checkoutSchemaBase.extend({
   paymentMethod: z.literal("whatsapp"),
@@ -17,14 +18,28 @@ export type CheckoutInput = z.infer<typeof checkoutSchema>;
  * That function is the single source of truth for pricing and stock;
  * this action never computes or passes a price/total itself.
  */
-export async function placeOrder(input: CheckoutInput) {
-  const parsed = checkoutSchema.parse(input);
+export async function placeOrder(
+  input: CheckoutInput
+): Promise<
+  ActionResult<{ order_id: string; order_number: string; total: number; discount: number }>
+> {
+  // Validation and expected failures are RETURNED, not thrown — a thrown
+  // error's message is replaced with a generic one in production, so the
+  // shopper would never learn "not enough stock" or "coupon expired".
+  // See lib/actions/result.ts.
+  const validation = checkoutSchema.safeParse(input);
+  if (!validation.success) {
+    return { ok: false, code: "FAILED", message: describeCheckoutIssue(validation.error) };
+  }
+  const parsed = validation.data;
   const supabase = createClient();
 
   const {
     data: { user },
   } = await supabase.auth.getUser();
-  if (!user) throw new Error("Sign in to place an order");
+  if (!user) {
+    return { ok: false, code: "NOT_SIGNED_IN", message: "Sign in to place an order" };
+  }
 
   const shippingAddress = {
     full_name: parsed.name,
@@ -48,9 +63,18 @@ export async function placeOrder(input: CheckoutInput) {
     p_coupon_code: parsed.couponCode || null,
   });
 
-  if (error) throw new Error(error.message);
+  // The database function raises readable messages for the cases a shopper
+  // can fix (stock ran out, coupon invalid/expired, empty cart) — pass
+  // those through as the result.
+  if (error) {
+    console.error("create_order_from_cart failed:", error.message);
+    return { ok: false, code: "FAILED", message: error.message };
+  }
   const result = Array.isArray(data) ? data[0] : data;
-  return result as { order_id: string; order_number: string; total: number; discount: number };
+  return {
+    ok: true,
+    ...(result as { order_id: string; order_number: string; total: number; discount: number }),
+  };
 }
 
 export async function getCheckoutMode(): Promise<"whatsapp" | "razorpay"> {

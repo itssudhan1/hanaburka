@@ -3,7 +3,12 @@
 import Razorpay from "razorpay";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { checkoutSchemaBase, type BaseCheckoutFields } from "@/lib/actions/checkout-schema";
+import {
+  checkoutSchemaBase,
+  describeCheckoutIssue,
+  type BaseCheckoutFields,
+} from "@/lib/actions/checkout-schema";
+import type { ActionResult } from "@/lib/actions/result";
 
 /**
  * Creates our internal order (via the same atomic create_order_from_cart
@@ -20,14 +25,44 @@ import { checkoutSchemaBase, type BaseCheckoutFields } from "@/lib/actions/check
 export async function createRazorpayOrder(
   input: BaseCheckoutFields,
   couponCode?: string
-) {
-  const parsed = checkoutSchemaBase.parse(input);
+): Promise<
+  ActionResult<{
+    orderNumber: string;
+    razorpayOrderId: string;
+    amount: number | string;
+    keyId: string;
+  }>
+> {
+  // Expected failures are RETURNED, not thrown — a thrown error's message
+  // is replaced with a generic one in production. See lib/actions/result.ts.
+  const validation = checkoutSchemaBase.safeParse(input);
+  if (!validation.success) {
+    return { ok: false, code: "FAILED", message: describeCheckoutIssue(validation.error) };
+  }
+  const parsed = validation.data;
+
+  // Checked BEFORE creating the order: the order-creation step below
+  // reserves stock, so discovering missing keys afterwards would leave
+  // stock held against an order that can never be paid.
+  const keyId = process.env.RAZORPAY_KEY_ID;
+  const keySecret = process.env.RAZORPAY_KEY_SECRET;
+  if (!keyId || !keySecret) {
+    console.error("Razorpay keys are missing from the environment");
+    return {
+      ok: false,
+      code: "FAILED",
+      message: "Online payment isn't available right now. Please order via WhatsApp instead.",
+    };
+  }
+
   const supabase = createClient();
 
   const {
     data: { user },
   } = await supabase.auth.getUser();
-  if (!user) throw new Error("Sign in to place an order");
+  if (!user) {
+    return { ok: false, code: "NOT_SIGNED_IN", message: "Sign in to place an order" };
+  }
 
   const shippingAddress = {
     full_name: parsed.name,
@@ -50,7 +85,10 @@ export async function createRazorpayOrder(
     p_order_note: parsed.orderNote || null,
     p_coupon_code: couponCode || null,
   });
-  if (error) throw new Error(error.message);
+  if (error) {
+    console.error("create_order_from_cart failed:", error.message);
+    return { ok: false, code: "FAILED", message: error.message };
+  }
 
   const result = Array.isArray(data) ? data[0] : data;
   const { order_id, order_number, total } = result as {
@@ -59,36 +97,37 @@ export async function createRazorpayOrder(
     total: number;
   };
 
-  if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
-    throw new Error(
-      "Razorpay is not configured yet — RAZORPAY_KEY_ID/SECRET are missing from the environment."
-    );
+  try {
+    const razorpay = new Razorpay({ key_id: keyId, key_secret: keySecret });
+
+    const razorpayOrder = await razorpay.orders.create({
+      amount: Math.round(total * 100), // paise, computed server-side only
+      currency: "INR",
+      receipt: order_number,
+      notes: { internal_order_id: order_id },
+    });
+
+    const admin = createAdminClient();
+    await admin.from("payments").insert({
+      order_id,
+      razorpay_order_id: razorpayOrder.id,
+      amount: total,
+      status: "pending",
+    });
+
+    return {
+      ok: true,
+      orderNumber: order_number,
+      razorpayOrderId: razorpayOrder.id,
+      amount: razorpayOrder.amount,
+      keyId,
+    };
+  } catch (err) {
+    console.error("Razorpay order creation failed:", err);
+    return {
+      ok: false,
+      code: "FAILED",
+      message: "Could not start the payment. Please try again, or order via WhatsApp.",
+    };
   }
-
-  const razorpay = new Razorpay({
-    key_id: process.env.RAZORPAY_KEY_ID,
-    key_secret: process.env.RAZORPAY_KEY_SECRET,
-  });
-
-  const razorpayOrder = await razorpay.orders.create({
-    amount: Math.round(total * 100), // paise, computed server-side only
-    currency: "INR",
-    receipt: order_number,
-    notes: { internal_order_id: order_id },
-  });
-
-  const admin = createAdminClient();
-  await admin.from("payments").insert({
-    order_id,
-    razorpay_order_id: razorpayOrder.id,
-    amount: total,
-    status: "pending",
-  });
-
-  return {
-    orderNumber: order_number,
-    razorpayOrderId: razorpayOrder.id,
-    amount: razorpayOrder.amount,
-    keyId: process.env.RAZORPAY_KEY_ID,
-  };
 }

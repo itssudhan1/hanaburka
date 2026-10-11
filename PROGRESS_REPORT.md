@@ -1689,3 +1689,62 @@ periodically (not currently scheduled — no cron is set up for it yet).
   layering a second loading treatment on top would look muddled rather
   than better.
 - `cleanup_old_login_attempts()` exists but isn't scheduled anywhere yet.
+
+---
+
+# Production Fix: Server-Action Errors Were Masked on the Live Site
+
+## 1. What happened
+On the deployed site (hanaburka.vercel.app), tapping **Buy Now** while
+signed out showed "An error occurred in the Server Components render. The
+specific message is omitted in production builds…" instead of sending the
+shopper to `/login`. It worked in `npm run dev`.
+
+Root cause: in production, Next.js replaces the message of any error
+*thrown* out of a server action with that generic string. The product page
+decided whether to redirect to login by checking
+`err.message.includes("Sign in")` — which only ever matched in dev. Every
+"expected" failure (not signed in, out of stock, invalid coupon, bad
+phone number) had the same problem, because the code was written and
+tested only against `next dev`.
+
+## 2. The fix
+Expected failures are now **returned**, never thrown (returned values are
+not masked). New shared type `ActionResult` in `lib/actions/result.ts`:
+`{ ok: true, ... } | { ok: false, code: "NOT_SIGNED_IN" | "FAILED", message }`.
+Converted: `addToCart`, `toggleWishlist`, `placeOrder`,
+`createRazorpayOrder`; and the four client components that call them
+(`VariantSelector` Add to Bag + Buy Now, `WishlistButton`, `CheckoutForm`,
+`RazorpayButton`).
+
+Also:
+- Checkout validation now uses `safeParse` and says e.g. "Please check your
+  phone number and try again." (new `describeCheckoutIssue` helper in
+  `checkout-schema.ts`) instead of throwing a raw Zod error.
+- `createRazorpayOrder` now checks that `RAZORPAY_KEY_ID`/`SECRET` exist
+  **before** creating the order. Previously it created the order (which
+  reserves stock) and only then discovered the keys were missing.
+- `moveWishlistItemToCart` checks `addToCart`'s result (it currently has no
+  callers, but would have silently ignored a failed add).
+
+## 3. Files
+Added: `lib/actions/result.ts`.
+Modified: `lib/actions/{cart,wishlist,checkout,checkout-schema,razorpay}.ts`,
+`components/product/{VariantSelector,WishlistButton}.tsx`,
+`components/checkout/{CheckoutForm,RazorpayButton}.tsx`.
+
+## 4. Database changes
+None.
+
+## 5. Known gaps
+- Same masked-error behaviour still exists in the **admin** forms
+  (`ProductForm`, `VariantManager`, `CouponManager`, `CategoryManager`,
+  `CollectionManager`, `BannerManager`, `ShipmentForm`, `PageContentEditor`,
+  `CustomerCareLinksManager`, `HomepageEditor`) and the customer
+  `ReturnRequestForm`: a failed save there shows the generic production
+  message instead of the real reason. Same fix pattern applies; not done yet.
+- Razorpay orders reserve stock at creation; an abandoned payment keeps
+  that stock reserved (pre-existing, noted in `razorpay.ts`) — no cleanup job.
+- Verified by `tsc --noEmit` (clean, nothing excluded) and `next lint`
+  (clean) only. The actual production behaviour has not been exercised in a
+  browser against the live site yet.

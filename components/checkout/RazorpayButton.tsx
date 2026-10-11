@@ -27,10 +27,17 @@ export default function RazorpayButton({
     setError(null);
     setLoading(true);
     try {
-      const { razorpayOrderId, amount, keyId, orderNumber } = await createRazorpayOrder(
-        getFields(),
-        couponCode
-      );
+      const created = await createRazorpayOrder(getFields(), couponCode);
+      if (!created.ok) {
+        if (created.code === "NOT_SIGNED_IN") {
+          router.push("/login");
+          return;
+        }
+        setError(created.message);
+        setLoading(false);
+        return;
+      }
+      const { razorpayOrderId, amount, keyId } = created;
 
       const rzp = new window.Razorpay({
         key: keyId,
@@ -59,8 +66,10 @@ export default function RazorpayButton({
       });
 
       rzp.open();
-    } catch (err: any) {
-      setError(err.message ?? "Could not start payment");
+    } catch {
+      // Only reached for a genuinely unexpected failure — expected ones
+      // (not signed in, bad input, stock/coupon problems) come back as results.
+      setError("Could not start the payment. Please try again.");
       setLoading(false);
     }
   }

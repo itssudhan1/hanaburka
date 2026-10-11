@@ -36,12 +36,14 @@ export default function WishlistButton({
       onClick={() =>
         startTransition(async () => {
           try {
-            const nowWishlisted = await toggleWishlist(productId);
-            setWishlisted(nowWishlisted);
-          } catch (err: any) {
-            if (err.message?.includes("Sign in")) {
-              router.push("/login");
+            const result = await toggleWishlist(productId);
+            if (!result.ok) {
+              if (result.code === "NOT_SIGNED_IN") router.push("/login");
+              return;
             }
+            setWishlisted(result.wishlisted);
+          } catch {
+            // Unexpected failure (network drop) — leave the heart as it was.
           }
         })
       }

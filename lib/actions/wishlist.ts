@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { addToCart } from "@/lib/actions/cart";
+import type { ActionResult } from "@/lib/actions/result";
 
 async function requireUser() {
   const supabase = createClient();
@@ -30,28 +31,43 @@ async function getOrCreateWishlist(supabase: any, userId: string) {
   return created.id;
 }
 
-export async function toggleWishlist(productId: string) {
-  const { supabase, user } = await requireUser();
-  const wishlistId = await getOrCreateWishlist(supabase, user.id);
-
-  const { data: existing } = await supabase
-    .from("wishlist_items")
-    .select("id")
-    .eq("wishlist_id", wishlistId)
-    .eq("product_id", productId)
-    .single();
-
-  if (existing) {
-    await supabase.from("wishlist_items").delete().eq("id", existing.id);
-  } else {
-    await supabase
-      .from("wishlist_items")
-      .insert({ wishlist_id: wishlistId, product_id: productId });
+export async function toggleWishlist(
+  productId: string
+): Promise<ActionResult<{ wishlisted: boolean }>> {
+  const supabase = createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  // Returned, not thrown — see lib/actions/result.ts.
+  if (!user) {
+    return { ok: false, code: "NOT_SIGNED_IN", message: "Sign in to use your wishlist" };
   }
 
-  revalidatePath("/wishlist");
-  revalidatePath("/product");
-  return !existing; // true if now wishlisted
+  try {
+    const wishlistId = await getOrCreateWishlist(supabase, user.id);
+
+    const { data: existing } = await supabase
+      .from("wishlist_items")
+      .select("id")
+      .eq("wishlist_id", wishlistId)
+      .eq("product_id", productId)
+      .single();
+
+    if (existing) {
+      await supabase.from("wishlist_items").delete().eq("id", existing.id);
+    } else {
+      await supabase
+        .from("wishlist_items")
+        .insert({ wishlist_id: wishlistId, product_id: productId });
+    }
+
+    revalidatePath("/wishlist");
+    revalidatePath("/product");
+    return { ok: true, wishlisted: !existing };
+  } catch (err) {
+    console.error("toggleWishlist failed:", err);
+    return { ok: false, code: "FAILED", message: "Could not update your wishlist. Please try again." };
+  }
 }
 
 export async function removeWishlistItem(itemId: string) {
@@ -65,6 +81,7 @@ export async function moveWishlistItemToCart(
   wishlistItemId: string,
   variantId: string
 ) {
-  await addToCart(variantId, 1);
+  const result = await addToCart(variantId, 1);
+  if (!result.ok) throw new Error(result.message);
   await removeWishlistItem(wishlistItemId);
 }

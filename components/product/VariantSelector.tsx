@@ -141,7 +141,15 @@ export default function VariantSelector({
             setAddError(null);
             startTransition(async () => {
               try {
-                await addToCart(selectedVariant.id, quantity);
+                const result = await addToCart(selectedVariant.id, quantity);
+                if (!result.ok) {
+                  if (result.code === "NOT_SIGNED_IN") {
+                    router.push("/login");
+                    return;
+                  }
+                  setAddError(result.message);
+                  return;
+                }
                 // Only plays once the add is actually confirmed — firing
                 // this before the server responds could show a success
                 // animation right before an error message (e.g. session
@@ -149,12 +157,10 @@ export default function VariantSelector({
                 if (addButtonRef.current) flyToCart(addButtonRef.current, imageUrl);
                 setAdded(true);
                 setTimeout(() => setAdded(false), 2000);
-              } catch (err: any) {
-                if (err.message?.includes("Sign in")) {
-                  router.push("/login");
-                  return;
-                }
-                setAddError(err.message ?? "Could not add to bag");
+              } catch {
+                // Only reached for a genuinely unexpected failure (network
+                // drop, server crash) — expected ones come back as results.
+                setAddError("Something went wrong. Please try again.");
               }
             });
           }}
@@ -187,14 +193,18 @@ export default function VariantSelector({
               setBuyNowError(null);
               startBuyNowTransition(async () => {
                 try {
-                  await addToCart(selectedVariant.id, quantity);
-                  router.push("/checkout");
-                } catch (err: any) {
-                  if (err.message?.includes("Sign in")) {
-                    router.push("/login");
+                  const result = await addToCart(selectedVariant.id, quantity);
+                  if (!result.ok) {
+                    if (result.code === "NOT_SIGNED_IN") {
+                      router.push("/login");
+                      return;
+                    }
+                    setBuyNowError(result.message);
                     return;
                   }
-                  setBuyNowError(err.message ?? "Could not proceed");
+                  router.push("/checkout");
+                } catch {
+                  setBuyNowError("Something went wrong. Please try again.");
                 }
               });
             }}
